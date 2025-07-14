@@ -5,18 +5,20 @@ specialist finds which tool to call
 intent finder replaced
 by MCP client
 Tool Agent
-P Not needed
+Not needed
 but can be used
 as subgraph
-How can we
-merge
-with MCP or
-find if
+How
+can we
+at all
+Find if
 an graph
-we include
-select state that you want
+would run
+parallelly?
+In UI when building Agent
+we would select state that you want
 to store. And you can select
-multiple MCP somet
+multiple MCP somer
 Agent would be registered
 w/ MCP
 
@@ -45,9 +47,9 @@ Aryan: Agent (RFI) → → → draft Agent
 
 **Extracted OCR text:**
 data → chart
-Multiples agents would generate at the end into a pdf.
+Multiples agents world generate at the end into a pdf
 SOL Agent: DB schema sample go
-find data about the user from simple query?
 Agent Mut
+find data about the user from simple query?
 Email/SMS go similar agents
 
