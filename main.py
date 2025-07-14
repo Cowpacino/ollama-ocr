@@ -20,6 +20,7 @@ class HybridPDFConverter:
     
     def __init__(self, table_strategy: str = "replace", extract_images: bool = True, 
                  image_format: str = "png", dpi: int = 150):
+        logging.basicConfig(level=logging.INFO)
         """
         Initialize hybrid converter.
         
@@ -57,7 +58,7 @@ class HybridPDFConverter:
     """
 
         payload = {
-            "model": "qwen2.5vl:3b",
+            "model": "qwen2.5vl:7b",
             "prompt": prompt,
             "images": [image_data],
             "stream": False,
@@ -98,7 +99,7 @@ class HybridPDFConverter:
             
             if ocr_text and ocr_text.strip():
                 # Create addition with OCR content below the image
-                addition = f"\n\n**Extracted OCR text:**\n```\n{ocr_text.strip()}\n```"
+                addition = f"\n\n**Extracted OCR text:**\n{ocr_text.strip()}\n"
                 
                 # Insert after the original image placeholder
                 end_pos = match.end()
@@ -415,6 +416,6 @@ def convert_pdf_hybrid_with_ocr(pdf_path: str, output_path: Optional[str] = None
     return converter.convert_pdf_hybrid_with_ocr(pdf_path, output_path)
 
 if __name__ == "__main__":
-    markdown = convert_pdf_hybrid_with_ocr("sample.pdf", "output.md", 
-                                          strategy="replace", extract_images=True,
+    markdown = convert_pdf_hybrid_with_ocr("Notes_250713_233056.pdf", "code.md", 
+                                          strategy="enhance", extract_images=True,
                                           image_format="png", dpi=500)
