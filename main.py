@@ -93,7 +93,7 @@ class ProductionOCRProcessor(Runnable[Dict[str, Any], OCRResult]):
                  enable_language_detection: bool = True,
                  quality_threshold: float = 0.8,
                  max_tokens: int = 2048,
-                 timeout_seconds: int = 120):
+                 timeout_seconds: int = 500):
         """
         Initialize with improved parameters and validation
         """
@@ -257,7 +257,7 @@ Keep the response brief and focused."""),
             chain = self.type_detector | self.llm | StrOutputParser()
             
             # Use cross-platform timeout
-            with CrossPlatformTimeout(30, "Document type detection timed out"):
+            with CrossPlatformTimeout(500, "Document type detection timed out"):
                 response = chain.invoke({"image_data": image_data})
             
             # Parse response
@@ -633,7 +633,7 @@ class ProductionHybridPDFConverter(Runnable[Dict[str, Any], Dict[str, Any]]):
             enable_language_detection=True,
             quality_threshold=quality_threshold,
             max_tokens=2048,
-            timeout_seconds=120
+            timeout_seconds=500
         )
     
     def apply_production_ocr_to_images(self, 
