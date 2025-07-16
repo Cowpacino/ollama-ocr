@@ -1,0 +1,31 @@
+{
+  "processing_timestamp": "2025-07-16T03:39:19.227480",
+  "total_processing_time": 2464.7221686840057,
+  "images_processed": 9,
+  "statistics": {
+    "successful_extractions": 9,
+    "failed_extractions": 0,
+    "low_confidence_extractions": 0,
+    "success_rate": 1.0,
+    "average_confidence": 0.8999999999999999,
+    "total_words_extracted": 9188,
+    "total_characters_extracted": 52309,
+    "average_processing_time_per_image": 273.4228757487403
+  },
+  "document_type_distribution": {
+    "invoice_receipt": 9
+  },
+  "language_distribution": {
+    "en": 9
+  },
+  "quality_metrics": {
+    "high_confidence_count": 9,
+    "medium_confidence_count": 0,
+    "low_confidence_count": 0,
+    "very_low_confidence_count": 0
+  },
+  "content_analysis": {
+    "documents_with_tables": 9,
+    "documents_with_handwriting": 3
+  }
+}

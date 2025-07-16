@@ -1,0 +1,31 @@
+{
+  "processing_timestamp": "2025-07-15T15:54:54.576580",
+  "total_processing_time": 492.80378460884094,
+  "images_processed": 3,
+  "statistics": {
+    "successful_extractions": 3,
+    "failed_extractions": 0,
+    "low_confidence_extractions": 0,
+    "success_rate": 1.0,
+    "average_confidence": 0.9,
+    "total_words_extracted": 145,
+    "total_characters_extracted": 751,
+    "average_processing_time_per_image": 163.27544260025024
+  },
+  "document_type_distribution": {
+    "handwritten": 3
+  },
+  "language_distribution": {
+    "en": 3
+  },
+  "quality_metrics": {
+    "high_confidence_count": 3,
+    "medium_confidence_count": 0,
+    "low_confidence_count": 0,
+    "very_low_confidence_count": 0
+  },
+  "content_analysis": {
+    "documents_with_tables": 0,
+    "documents_with_handwriting": 3
+  }
+}
