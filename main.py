@@ -7,7 +7,6 @@ import base64
 import os
 import time
 import json
-import threading
 from typing import List, Dict, Optional, Tuple, Any
 import logging
 from enum import Enum
@@ -19,36 +18,6 @@ from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
-
-
-class TimeoutError(Exception):
-    """Custom timeout exception for cross-platform compatibility"""
-    pass
-
-
-class CrossPlatformTimeout:
-    """Cross-platform timeout handler that works on both Windows and Unix"""
-    
-    def __init__(self, seconds: int, error_message: str = "Operation timed out"):
-        self.seconds = seconds
-        self.error_message = error_message
-        self.timer: Optional[threading.Timer] = None
-        
-    def _timeout_handler(self):
-        """Handler called when timeout occurs"""
-        raise TimeoutError(self.error_message)
-    
-    def __enter__(self):
-        """Start the timeout timer"""
-        self.timer = threading.Timer(self.seconds, self._timeout_handler)
-        self.timer.start()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Cancel the timeout timer"""
-        if self.timer:
-            self.timer.cancel()
-            self.timer = None
 
 
 class DocumentType(Enum):
@@ -92,8 +61,7 @@ class ProductionOCRProcessor(Runnable[Dict[str, Any], OCRResult]):
                  enable_confidence_scoring: bool = True,
                  enable_language_detection: bool = True,
                  quality_threshold: float = 0.8,
-                 max_tokens: int = 2048,
-                 timeout_seconds: int = 500):
+                 max_tokens: int = 2048):
         """
         Initialize with improved parameters and validation
         """
@@ -101,7 +69,6 @@ class ProductionOCRProcessor(Runnable[Dict[str, Any], OCRResult]):
         self.enable_confidence_scoring = enable_confidence_scoring
         self.enable_language_detection = enable_language_detection
         self.quality_threshold = quality_threshold
-        self.timeout_seconds = timeout_seconds
         
         # Initialize ChatOllama with production settings
         self.llm = ChatOllama(
@@ -252,13 +219,10 @@ Keep the response brief and focused."""),
         ])
     
     def _detect_document_type(self, image_data: str) -> Tuple[DocumentType, float, Optional[str], bool, bool]:
-        """Detect document type with cross-platform timeout"""
+        """Detect document type"""
         try:
             chain = self.type_detector | self.llm | StrOutputParser()
-            
-            # Use cross-platform timeout
-            with CrossPlatformTimeout(500, "Document type detection timed out"):
-                response = chain.invoke({"image_data": image_data})
+            response = chain.invoke({"image_data": image_data})
             
             # Parse response
             lines = response.strip().split('\n')
@@ -289,9 +253,6 @@ Keep the response brief and focused."""),
             
             return doc_type, confidence, language, has_tables, has_handwriting
             
-        except TimeoutError:
-            self.logger.error("Document type detection timed out")
-            return DocumentType.MIXED_CONTENT, 0.5, None, False, False
         except Exception as e:
             self.logger.error(f"Document type detection failed: {e}")
             return DocumentType.MIXED_CONTENT, 0.5, None, False, False
@@ -467,7 +428,7 @@ Keep the response brief and focused."""),
                config: Optional[RunnableConfig] = None,
                **kwargs) -> OCRResult:
         """
-        Enhanced invoke method with cross-platform timeout and better error handling
+        Enhanced invoke method with retry logic based on quality validation
         """
         start_time = time.time()
         
@@ -513,7 +474,7 @@ Keep the response brief and focused."""),
         prompt_template = self.prompts.get(doc_type, self.prompts[DocumentType.MIXED_CONTENT])
         chain = prompt_template | self.llm | StrOutputParser()
         
-        # Step 3: Extract text with retry logic and cross-platform timeout
+        # Step 3: Extract text with retry logic
         extracted_text = None
         error_message = None
         
@@ -522,13 +483,11 @@ Keep the response brief and focused."""),
             try:
                 self.logger.info(f"Starting OCR attempt {attempt + 1} for {image_path}")
                 
-                # Use cross-platform timeout instead of signal.alarm
-                with CrossPlatformTimeout(self.timeout_seconds, "OCR processing timed out"):
-                    result = chain.invoke(
-                        {"image_data": image_data}, 
-                        config=config, 
-                        **kwargs
-                    )
+                result = chain.invoke(
+                    {"image_data": image_data}, 
+                    config=config, 
+                    **kwargs
+                )
                 
                 # Clean up the response
                 extracted_text = self._clean_raw_text_response(result)
@@ -546,14 +505,6 @@ Keep the response brief and focused."""),
                         extracted_text = "[OCR_FAILED: Poor quality extraction after retries]"
                         error_message = "Poor quality extraction after retries"
                         
-            except TimeoutError:
-                if attempt < max_retries - 1:
-                    self.logger.warning(f"⚠️ OCR timeout, retrying... (attempt {attempt + 1})")
-                    continue
-                else:
-                    error_message = "OCR processing timed out"
-                    extracted_text = "[OCR_FAILED: Processing timeout]"
-                    break
             except Exception as e:
                 if attempt < max_retries - 1:
                     self.logger.warning(f"⚠️ OCR attempt {attempt + 1} failed: {e}, retrying...")
@@ -632,8 +583,7 @@ class ProductionHybridPDFConverter(Runnable[Dict[str, Any], Dict[str, Any]]):
             enable_confidence_scoring=True,
             enable_language_detection=True,
             quality_threshold=quality_threshold,
-            max_tokens=2048,
-            timeout_seconds=500
+            max_tokens=2048
         )
     
     def apply_production_ocr_to_images(self, 
@@ -1040,7 +990,6 @@ class ProductionHybridPDFConverter(Runnable[Dict[str, Any], Dict[str, Any]]):
                 "documents_with_handwriting": len([r for r in ocr_results if r.has_handwriting])
             },
             "error_analysis": {
-                "timeout_errors": len([r for r in ocr_results if r.error_message and "timeout" in r.error_message.lower()]),
                 "quality_failures": len([r for r in ocr_results if r.error_message and "quality" in r.error_message.lower()]),
                 "processing_errors": len([r for r in ocr_results if r.error_message and "error" in r.error_message.lower()])
             }
@@ -1098,4 +1047,3 @@ if __name__ == "__main__":
         quality_threshold=0.8,
         save_intermediate_results=True,
     )
-    
