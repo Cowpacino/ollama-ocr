@@ -26,7 +26,7 @@ class LangChainOCRProcessor(Runnable[Dict[str, Any], str]):
     def __init__(self, 
                  model: str = "qwen2.5vl:7b",
                  base_url: str = "http://localhost:11434",
-                 temperature: float = 0.3,  # Increased from 0.1 to reduce repetition
+                 temperature: float = 0.3,  # Increased from 0.1 to reduce repetition and reduced from 0.8 to eliminate randomness
                  skip_failed_images: bool = True):
         """
         Initialize LangChain OCR processor with fixes for qwen2.5vl issues.
@@ -40,7 +40,7 @@ class LangChainOCRProcessor(Runnable[Dict[str, Any], str]):
         self.logger = logging.getLogger(__name__)
         self.skip_failed_images = skip_failed_images
         
-        # CRITICAL FIX: Optimized settings for qwen2.5vl to prevent repetition
+        # Optimized settings for qwen2.5vl to prevent repetition
         self.llm = ChatOllama(
             model=model,
             base_url=base_url,
@@ -57,7 +57,7 @@ class LangChainOCRProcessor(Runnable[Dict[str, Any], str]):
             num_thread=None,  # Auto-detect threads
         )
         
-        # CRITICAL FIX: Simplified prompt to prevent contamination
+        # Simplified prompt to prevent contamination
         self.ocr_prompt = self._create_ocr_prompt()
         
         # Create the processing chain
@@ -66,7 +66,7 @@ class LangChainOCRProcessor(Runnable[Dict[str, Any], str]):
     def _create_ocr_prompt(self) -> ChatPromptTemplate:
         """Create optimized OCR prompt template to prevent contamination."""
         
-        # CRITICAL FIX: Simplified system prompt to prevent leakage
+        # Simplified system prompt to prevent leakage
         system_prompt = """You are an OCR assistant. Extract all visible text from the image accurately. 
 Output only the extracted text with no explanations or formatting."""
         
@@ -180,7 +180,7 @@ Output only the extracted text with no explanations or formatting."""
         # Remove common prompt artifacts
         cleaned = response_text.strip()
         
-        # CRITICAL FIX: Remove system prompt contamination
+        # Remove system prompt contamination
         contamination_patterns = [
             r'^.*?You are an OCR assistant.*?\n',
             r'^.*?Extract all visible text.*?\n',
@@ -538,7 +538,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         return final_markdown
 
 
-# CRITICAL FIX: Enhanced convenience functions
+# convenience functions
 def create_langchain_pdf_converter(model: str = "qwen2.5vl:7b", **kwargs) -> LangChainHybridPDFConverter:
     """Create a LangChain-based PDF converter with qwen2.5vl optimizations."""
     return LangChainHybridPDFConverter(ocr_model=model, **kwargs)
@@ -577,11 +577,11 @@ def create_pdf_processing_chain(model: str = "qwen2.5vl:7b", **kwargs):
     converter = create_langchain_pdf_converter(model=model, **kwargs)
     
     def preprocess(input_data):
-        # Enhanced preprocessing
+        # preprocessing
         return input_data
     
     def postprocess(markdown_content):
-        # Enhanced postprocessing with status
+        # postprocessing 
         return {
             "markdown": markdown_content, 
             "status": "completed",
@@ -601,31 +601,17 @@ def create_pdf_processing_chain(model: str = "qwen2.5vl:7b", **kwargs):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    
-    # CRITICAL FIX: Enhanced usage with optimized settings
-    print("Starting enhanced PDF processing with qwen2.5vl fixes...")
-    
-    markdown = convert_pdf_with_langchain(
-        "Notes_250713_233056.pdf", 
-        "enhanced_output.md", 
-        model="qwen2.5vl:7b",
-        table_strategy="enhance", 
-        extract_images=True,
-        image_format="png", 
-        dpi=300,  # Reduced from 500 for stability
-        skip_failed_images=True
-    )
-    print("Enhanced markdown saved to: enhanced_output.md")
-
 
     pdf_chain = create_pdf_processing_chain(
         model="qwen2.5vl:7b",
         table_strategy="replace",
-        extract_images=True
+        extract_images=True,
+        dpi = 400,
+        skip_failed_images=True
     )
     
     result = pdf_chain.invoke({
-        "pdf_path": "Notes_250713_233056.pdf",
+        "pdf_path": "reporting.pdf",
         "output_path": "advanced_enhanced_output.md"
     })
     
