@@ -20,66 +20,60 @@ from langchain_core.runnables import RunnableLambda
 class LangChainOCRProcessor(Runnable[Dict[str, Any], str]):
     """
     LangChain-compatible OCR processor using Ollama VLM models.
-    Maintains the original prompt and functionality while using LangChain's interface.
+    Fixed for qwen2.5vl repetition and prompt contamination issues.
     """
     
     def __init__(self, 
                  model: str = "qwen2.5vl:7b",
                  base_url: str = "http://localhost:11434",
-                 temperature: float = 0.1,
-                 max_retries: int = 2,
-                 timeout: int = 120,
+                 temperature: float = 0.3,  # Increased from 0.1 to reduce repetition
                  skip_failed_images: bool = True):
         """
-        Initialize LangChain OCR processor.
+        Initialize LangChain OCR processor with fixes for qwen2.5vl issues.
         
         Args:
-            model: Ollama VLM model name
+            model: Ollama VLM model name (default: qwen2.5vl:7b)
             base_url: Ollama server URL
-            temperature: Model temperature
-            max_retries: Maximum retry attempts
-            timeout: Request timeout in seconds (stored for potential future use)
+            temperature: Model temperature (0.3 recommended for qwen2.5vl)
             skip_failed_images: Whether to skip failed images
         """
         self.logger = logging.getLogger(__name__)
-        self.max_retries = max_retries
-        self.timeout = timeout  # Store timeout for potential future use
         self.skip_failed_images = skip_failed_images
         
-        # Initialize ChatOllama with optimal settings for OCR
-        # Note: ChatOllama doesn't have a timeout parameter
+        # CRITICAL FIX: Optimized settings for qwen2.5vl to prevent repetition
         self.llm = ChatOllama(
             model=model,
             base_url=base_url,
             temperature=temperature,
-            top_p=0.001,
-            repeat_penalty=1.05,
-            num_predict=2048
+            top_p=0.9,  # Nucleus sampling to reduce repetition
+            repeat_penalty=1.15,  # Higher penalty for repetition
+            repeat_last_n=128,  # Look back further to prevent repetition
+            num_ctx=32768,  # Increased context window (from default 2048)
+            num_predict=1024,  # Limit response length
+            stop=["<|im_end|>", "<|endoftext|>", "```", "\n\n---", "**Extracted OCR text:**"],  # Stop tokens
+            # Additional parameters for stability
+            top_k=40,
+            seed=42,  # For reproducibility
+            num_thread=None,  # Auto-detect threads
         )
         
-        # Create the OCR prompt template (preserving original prompt)
+        # CRITICAL FIX: Simplified prompt to prevent contamination
         self.ocr_prompt = self._create_ocr_prompt()
         
         # Create the processing chain
         self.chain = self.ocr_prompt | self.llm | StrOutputParser()
     
     def _create_ocr_prompt(self) -> ChatPromptTemplate:
-        """Create the OCR prompt template maintaining original functionality."""
-        system_prompt = """Extract all visible text from this image accurately and completely.
-
-Instructions:
-- Extract ALL text including headers, body text, annotations, numbers, and special characters
-- Preserve the logical reading order and line breaks
-- Include handwritten text if present
-- Output only the extracted text with no explanations, formatting, or extra commentary
-- If no text is found, respond with nothing
-
-Extracted text:"""
+        """Create optimized OCR prompt template to prevent contamination."""
+        
+        # CRITICAL FIX: Simplified system prompt to prevent leakage
+        system_prompt = """You are an OCR assistant. Extract all visible text from the image accurately. 
+Output only the extracted text with no explanations or formatting."""
         
         return ChatPromptTemplate.from_messages([
             ("system", system_prompt),
             ("human", [
-                {"type": "text", "text": "Please extract all text from this image:"},
+                {"type": "text", "text": "Extract all text from this image:"},
                 {"type": "image", "source_type": "base64", "data": "{image_data}", "mime_type": "image/png"}
             ])
         ])
@@ -89,7 +83,7 @@ Extracted text:"""
                config: Optional[RunnableConfig] = None,
                **kwargs) -> Any:
         """
-        Process a single image with retry logic.
+        Process a single image with fast error handling (no retries).
         
         Args:
             input: Dictionary containing 'image_path' or 'image_data' key
@@ -118,70 +112,118 @@ Extracted text:"""
             self.logger.error("No image data provided")
             return None
         
-        # Retry logic with exponential backoff
-        for attempt in range(self.max_retries + 1):
-            try:
-                if attempt > 0:
-                    self.logger.info(f"Retrying OCR for {image_path} (attempt {attempt + 1}/{self.max_retries + 1})")
+        # CRITICAL FIX: Fast processing - no retries for parsing efficiency
+        try:
+            self.logger.info(f"Processing OCR for {image_path}")
+            
+            # Direct invocation to avoid LangChain template issues
+            result = self.chain.invoke(
+                {"image_data": image_data}, 
+                config=config, 
+                **kwargs
+            )
+            
+            # Enhanced text cleaning to prevent contamination
+            extracted_text = self._clean_raw_text_response(result)
+            
+            if extracted_text and extracted_text.strip():
+                # Check for repetition patterns
+                if self._detect_repetition(extracted_text):
+                    self.logger.warning(f"Detected repetition in {image_path}")
+                    if self.skip_failed_images:
+                        return "[OCR_FAILED: Repetition detected in output]"
+                    else:
+                        return None
                 
-                self.logger.info(f"Starting OCR for {image_path}")
+                self.logger.info(f"Successfully extracted text from {image_path} ({len(extracted_text)} chars)")
+                return extracted_text
+            else:
+                self.logger.warning(f"No text extracted from {image_path}")
                 
-                result = self.chain.invoke(
-                    {"image_data": image_data}, 
-                    config=config, 
-                    **kwargs
-                )
-                
-                # Clean up the response
-                extracted_text = self._clean_raw_text_response(result)
-                
-                if extracted_text and extracted_text.strip():
-                    self.logger.info(f"Successfully extracted text from {image_path} ({len(extracted_text)} chars)")
-                    return extracted_text
-                else:
-                    self.logger.warning(f"No text extracted from {image_path} on attempt {attempt + 1}")
-                    
-            except Exception as e:
-                self.logger.error(f"OCR error for {image_path} (attempt {attempt + 1}): {e}")
-                if attempt < self.max_retries:
-                    wait_time = 2 ** attempt
-                    self.logger.info(f"Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                    continue
+        except Exception as e:
+            self.logger.error(f"OCR error for {image_path}: {e}")
         
-        # All retries failed
-        self.logger.error(f"Failed to extract text from {image_path} after {self.max_retries + 1} attempts")
-        
+        # Handle failure
         if self.skip_failed_images:
-            self.logger.warning(f"Skipping failed image {image_path} and continuing processing")
-            return "[OCR_FAILED: Image processing timed out or failed]"
+            self.logger.warning(f"Skipping failed image {image_path}")
+            return "[OCR_FAILED: Image processing failed]"
         else:
             return None
     
+    def _detect_repetition(self, text: str) -> bool:
+        """Detect repetitive patterns in the text."""
+        if not text or len(text) < 50:
+            return False
+        
+        # Check for repeated phrases (3+ words)
+        words = text.split()
+        if len(words) < 10:
+            return False
+        
+        # Look for patterns that repeat more than 3 times
+        for i in range(len(words) - 9):
+            phrase = ' '.join(words[i:i+3])
+            if text.count(phrase) >= 3:
+                return True
+        
+        # Check for character repetition
+        if re.search(r'(.)\1{10,}', text):
+            return True
+        
+        return False
+    
     def _clean_raw_text_response(self, response_text: str) -> Optional[str]:
-        """Clean up raw text response (preserving original logic)."""
+        """Enhanced text cleaning to prevent contamination."""
         if not response_text:
             return None
         
-        # Remove common prompt artifacts that might leak through
+        # Remove common prompt artifacts
         cleaned = response_text.strip()
         
-        # Remove any leftover prompt text that might appear at the start
-        cleaned = re.sub(r'^.*?Extracted text:\s*', '', cleaned, flags=re.IGNORECASE | re.DOTALL)
+        # CRITICAL FIX: Remove system prompt contamination
+        contamination_patterns = [
+            r'^.*?You are an OCR assistant.*?\n',
+            r'^.*?Extract all visible text.*?\n',
+            r'^.*?Output only the extracted text.*?\n',
+            r'^.*?Extracted text:\s*',
+            r'^.*?Extract all text from this image:\s*',
+            r'<\|im_start\|>.*?<\|im_end\|>',
+            r'<\|.*?\|>',
+            r'Human:.*?AI:',
+            r'system:.*?user:',
+            r'assistant:.*?user:',
+        ]
         
-        # Remove any markdown code blocks that might wrap the text
+        for pattern in contamination_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Remove markdown artifacts
         cleaned = re.sub(r'^```.*?\n', '', cleaned, flags=re.MULTILINE)
         cleaned = re.sub(r'\n```$', '', cleaned, flags=re.MULTILINE)
         
-        # Clean up excessive whitespace but preserve meaningful line breaks
+        # CRITICAL FIX: Enhanced repetition detection and removal
+        # Remove repeated lines
+        lines = cleaned.split('\n')
+        unique_lines = []
+        seen_lines = set()
+        
+        for line in lines:
+            line_clean = line.strip()
+            if line_clean and line_clean not in seen_lines:
+                unique_lines.append(line)
+                seen_lines.add(line_clean)
+        
+        cleaned = '\n'.join(unique_lines)
+        
+        # Clean up whitespace
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)  # Remove trailing spaces
-        cleaned = re.sub(r'\n[ \t]+', '\n', cleaned)  # Remove leading spaces on lines
+        cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
+        cleaned = re.sub(r'\n[ \t]+', '\n', cleaned)
         
         # Strip final whitespace
         cleaned = cleaned.strip()
         
-        # Return None if we ended up with only whitespace
+        # Return None if empty
         if not cleaned or re.match(r'^[\s\n]*$', cleaned):
             return None
             
@@ -190,7 +232,7 @@ Extracted text:"""
 
 class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
     """
-    LangChain-compatible Hybrid PDF converter maintaining all original functionality.
+    LangChain-compatible Hybrid PDF converter with comprehensive fixes.
     """
     
     def __init__(self, 
@@ -200,11 +242,9 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
                  dpi: int = 150, 
                  ocr_model: str = "qwen2.5vl:7b",
                  ocr_base_url: str = "http://localhost:11434",
-                 ocr_timeout: int = 60, 
-                 max_retries: int = 2, 
                  skip_failed_images: bool = True):
         """
-        Initialize LangChain hybrid converter.
+        Initialize LangChain hybrid converter with comprehensive fixes.
         
         Args:
             table_strategy: "replace" or "enhance"
@@ -213,8 +253,6 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
             dpi: Image resolution for extracted images
             ocr_model: Ollama VLM model for OCR
             ocr_base_url: Ollama server URL
-            ocr_timeout: Timeout in seconds for OCR requests
-            max_retries: Maximum number of retry attempts for failed OCR
             skip_failed_images: Whether to skip images that fail OCR
         """
         logging.basicConfig(level=logging.INFO)
@@ -224,13 +262,11 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         self.dpi = dpi
         self.logger = logging.getLogger(__name__)
         
-        # Initialize LangChain OCR processor
+        # CRITICAL FIX: Initialize OCR processor with optimized settings
         self.ocr_processor = LangChainOCRProcessor(
             model=ocr_model,
             base_url=ocr_base_url,
-            temperature=0.1,
-            max_retries=max_retries,
-            timeout=ocr_timeout,
+            temperature=0.3,  # Optimal for qwen2.5vl
             skip_failed_images=skip_failed_images
         )
     
@@ -239,7 +275,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
                config: Optional[RunnableConfig] = None,
                **kwargs) -> str:
         """
-        Convert PDF using hybrid approach with LangChain OCR.
+        Convert PDF using hybrid approach with comprehensive fixes.
         
         Args:
             input: Dictionary containing 'pdf_path' and optional 'output_path'
@@ -254,14 +290,14 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         # Step 1: Run standard hybrid conversion
         markdown_content = self.convert_pdf_hybrid(pdf_path, output_path)
         
-        # Step 2: Apply LangChain OCR to extracted images if output path provided
+        # Step 2: Apply enhanced OCR to extracted images
         if output_path and self.extract_images:
-            self.logger.info("Applying LangChain OCR to extracted images...")
+            self.logger.info("Applying enhanced LangChain OCR to extracted images...")
             markdown_content = self.apply_langchain_ocr_to_images(markdown_content, output_path, config)
             
             # Save updated markdown with OCR content
             pathlib.Path(output_path).write_text(markdown_content, encoding='utf-8')
-            self.logger.info(f"Updated markdown with LangChain OCR saved to: {output_path}")
+            self.logger.info(f"Updated markdown with enhanced OCR saved to: {output_path}")
         
         return markdown_content
 
@@ -270,7 +306,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
                                      output_path: str,
                                      config: Optional[RunnableConfig] = None) -> str:
         """
-        Find image placeholders in markdown and add OCR text using LangChain.
+        Apply enhanced OCR to images with fast error handling (no retries).
         """
         image_pattern = r'!\[(.*?)\]\((.*?)\)'
         matches = list(re.finditer(image_pattern, markdown_content))
@@ -278,7 +314,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         if not matches:
             return markdown_content
         
-        self.logger.info(f"Found {len(matches)} images to process with LangChain OCR")
+        self.logger.info(f"Found {len(matches)} images to process with enhanced OCR")
         
         updated_content = markdown_content
         output_dir = os.path.dirname(output_path)
@@ -292,34 +328,41 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
             current_image = total_images - idx + 1
             self.logger.info(f"Processing image {current_image}/{total_images}: {image_path}")
             
-            # Extract text from image using LangChain OCR
-            ocr_text = self.ocr_processor.invoke(
-                {"image_path": full_image_path}, 
-                config=config
-            )
-            
-            if ocr_text and ocr_text.strip():
-                # Check if this is a failure marker
-                if ocr_text.startswith("[OCR_FAILED"):
-                    addition = f"\n\n**Extracted OCR text:**\n{ocr_text.strip()}\n"
-                    self.logger.warning(f"OCR failed for image {current_image}/{total_images}: {image_path}")
-                else:
-                    # Create addition with OCR content
-                    addition = f"\n\n**Extracted OCR text:**\n{ocr_text.strip()}\n"
-                    self.logger.info(f"Successfully processed image {current_image}/{total_images}: {image_path} ({len(ocr_text)} chars)")
+            # CRITICAL FIX: Enhanced OCR processing with fast error handling
+            try:
+                ocr_text = self.ocr_processor.invoke(
+                    {"image_path": full_image_path}, 
+                    config=config
+                )
                 
-                # Insert after the original image placeholder
+                if ocr_text and ocr_text.strip():
+                    # Check for failure markers
+                    if ocr_text.startswith("[OCR_FAILED"):
+                        addition = f"\n\n**OCR Status:**\n{ocr_text.strip()}\n"
+                        self.logger.warning(f"OCR failed for image {current_image}/{total_images}: {image_path}")
+                    else:
+                        # CRITICAL FIX: Enhanced OCR content formatting
+                        addition = f"\n\n**Extracted Text:**\n{ocr_text.strip()}\n"
+                        self.logger.info(f"Successfully processed image {current_image}/{total_images}: {image_path} ({len(ocr_text)} chars)")
+                    
+                    # Insert after the original image placeholder
+                    end_pos = match.end()
+                    updated_content = updated_content[:end_pos] + addition + updated_content[end_pos:]
+                    
+                else:
+                    self.logger.warning(f"No text extracted from image {current_image}/{total_images}: {image_path}")
+                    
+            except Exception as e:
+                self.logger.error(f"Error processing image {current_image}/{total_images}: {image_path} - {e}")
+                addition = f"\n\n**OCR Status:**\n[OCR_ERROR: {str(e)}]\n"
                 end_pos = match.end()
                 updated_content = updated_content[:end_pos] + addition + updated_content[end_pos:]
-                
-            else:
-                self.logger.warning(f"No text extracted from image {current_image}/{total_images}: {image_path}")
 
-        self.logger.info(f"Completed LangChain OCR processing for all {len(matches)} images")
+        self.logger.info(f"Completed enhanced OCR processing for all {len(matches)} images")
         return updated_content
 
     def extract_tables_with_pdfplumber(self, pdf_path: str) -> Dict[int, List[str]]:
-        """Extract tables from PDF using pdfplumber (unchanged)."""
+        """Extract tables from PDF using pdfplumber."""
         tables_by_page = {}
         
         with pdfplumber.open(pdf_path) as pdf:
@@ -342,7 +385,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         return tables_by_page
     
     def _table_to_markdown(self, table: List[List[str]]) -> Optional[str]:
-        """Convert table data to markdown format (unchanged)."""
+        """Convert table data to markdown format."""
         if not table or len(table) < 2:
             return None
         
@@ -368,7 +411,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
             return None
     
     def _detect_table_regions(self, text: str) -> List[Tuple[int, int]]:
-        """Detect potential table regions in text (unchanged)."""
+        """Detect potential table regions in text."""
         table_regions = []
         
         # Look for table-like patterns
@@ -379,7 +422,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         for i, line in enumerate(lines):
             line = line.strip()
             
-            # Detect table start (multiple separators or aligned columns)
+            # Detect table start
             if not in_table and (
                 line.count('|') >= 2 or  # Markdown table
                 line.count('\t') >= 2 or  # Tab-separated
@@ -389,7 +432,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
                 in_table = True
                 start_idx = i
             
-            # Detect table end (empty line or different pattern)
+            # Detect table end
             elif in_table and (
                 not line or
                 (line.count('|') < 2 and line.count('\t') < 2 and 
@@ -403,7 +446,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
     
     def _replace_tables_in_text(self, text: str, page_num: int, 
                                pdfplumber_tables: Dict[int, List[str]]) -> str:
-        """Replace detected table regions with pdfplumber-extracted tables (unchanged)."""
+        """Replace detected table regions with pdfplumber-extracted tables."""
         if page_num not in pdfplumber_tables:
             return text
         
@@ -418,13 +461,13 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
                 # Replace the table region
                 new_lines = lines[:start-offset] + [pdfplumber_page_tables[i]] + lines[end-offset:]
                 lines = new_lines
-                offset += (end - start - 1)  # Adjust offset for replaced content
+                offset += (end - start - 1)
         
         return '\n'.join(lines)
     
     def _enhance_text_with_tables(self, text: str, page_num: int, 
                                  pdfplumber_tables: Dict[int, List[str]]) -> str:
-        """Add pdfplumber tables to text if they don't already exist (unchanged)."""
+        """Add pdfplumber tables to text if they don't already exist."""
         if page_num not in pdfplumber_tables:
             return text
         
@@ -443,7 +486,7 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         return text
 
     def convert_pdf_hybrid(self, pdf_path: str, output_path: Optional[str] = None) -> str:
-        """Convert PDF using hybrid approach (mostly unchanged)."""
+        """Convert PDF using hybrid approach with enhanced settings."""
         # Step 1: Extract tables using pdfplumber
         self.logger.info("Extracting tables with pdfplumber...")
         pdfplumber_tables = self.extract_tables_with_pdfplumber(pdf_path)
@@ -495,9 +538,9 @@ class LangChainHybridPDFConverter(Runnable[Dict[str, Any], str]):
         return final_markdown
 
 
-# Convenience functions for easy usage
+# CRITICAL FIX: Enhanced convenience functions
 def create_langchain_pdf_converter(model: str = "qwen2.5vl:7b", **kwargs) -> LangChainHybridPDFConverter:
-    """Create a LangChain-based PDF converter with specified model."""
+    """Create a LangChain-based PDF converter with qwen2.5vl optimizations."""
     return LangChainHybridPDFConverter(ocr_model=model, **kwargs)
 
 
@@ -506,16 +549,16 @@ def convert_pdf_with_langchain(pdf_path: str,
                               model: str = "qwen2.5vl:7b",
                               **kwargs) -> str:
     """
-    Simple function interface for LangChain-based hybrid PDF conversion.
+    Enhanced PDF conversion with comprehensive fixes for qwen2.5vl.
     
     Args:
         pdf_path: Path to input PDF
         output_path: Path to output markdown file (optional)
-        model: Ollama VLM model to use
+        model: Ollama VLM model to use (default: qwen2.5vl:7b)
         **kwargs: Additional arguments for the converter
     
     Returns:
-        Markdown text with LangChain OCR applied to images
+        Markdown text with enhanced OCR applied to images
     """
     converter = create_langchain_pdf_converter(model=model, **kwargs)
     return converter.invoke({
@@ -524,26 +567,29 @@ def convert_pdf_with_langchain(pdf_path: str,
     })
 
 
-# Advanced usage with LangChain chains
 def create_pdf_processing_chain(model: str = "qwen2.5vl:7b", **kwargs):
     """
-    Create a LangChain chain for PDF processing.
+    Create an enhanced LangChain chain for PDF processing.
     
     Returns:
-        A Runnable chain that can be used with LangChain LCEL
+        A Runnable chain optimized for qwen2.5vl
     """
     converter = create_langchain_pdf_converter(model=model, **kwargs)
     
-    # Define preprocessing and postprocessing steps if needed
     def preprocess(input_data):
-        # Add any preprocessing logic here
+        # Enhanced preprocessing
         return input_data
     
     def postprocess(markdown_content):
-        # Add any postprocessing logic here
-        return {"markdown": markdown_content, "status": "completed"}
+        # Enhanced postprocessing with status
+        return {
+            "markdown": markdown_content, 
+            "status": "completed",
+            "model": model,
+            "timestamp": time.time()
+        }
     
-    # Create the full chain using LCEL
+    # Create the enhanced chain
     chain = (
         RunnableLambda(preprocess) |
         converter |
@@ -556,21 +602,22 @@ def create_pdf_processing_chain(model: str = "qwen2.5vl:7b", **kwargs):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
-    # Simple usage
+    # CRITICAL FIX: Enhanced usage with optimized settings
+    print("Starting enhanced PDF processing with qwen2.5vl fixes...")
+    
     markdown = convert_pdf_with_langchain(
         "Notes_250713_233056.pdf", 
-        "langchain_output.md", 
+        "enhanced_output.md", 
         model="qwen2.5vl:7b",
         table_strategy="enhance", 
         extract_images=True,
         image_format="png", 
-        dpi=500,
-        ocr_timeout=120,
-        max_retries=1,
+        dpi=300,  # Reduced from 500 for stability
         skip_failed_images=True
     )
-    
-    # Advanced usage with custom chain
+    print("Enhanced markdown saved to: enhanced_output.md")
+
+
     pdf_chain = create_pdf_processing_chain(
         model="qwen2.5vl:7b",
         table_strategy="replace",
@@ -579,5 +626,9 @@ if __name__ == "__main__":
     
     result = pdf_chain.invoke({
         "pdf_path": "Notes_250713_233056.pdf",
-        "output_path": "advanced_output.md"
+        "output_path": "advanced_enhanced_output.md"
     })
+    
+    print(f"Advanced processing completed with status: {result['status']}")
+    print(f"Model used: {result['model']}")
+    print(f"Timestamp: {result['timestamp']}")
